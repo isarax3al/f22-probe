@@ -1,0 +1,124 @@
+# F22 probe — branch-name URL-fragment confusion in claude-code-action
+#
+# Place at .github/workflows/claude.yml in a DISPOSABLE repo you own.
+# Preconditions (all required, see RUNBOOK):
+#   - default branch `main` has NO branch protection
+#   - repo secret ANTHROPIC_API_KEY is set
+#   - the PR head branch is named with a '#', e.g. main#probe
+#
+# The action is PINNED to the reviewed commit so a mid-test patch cannot
+# silently turn a positive into a confusing negative.
+
+name: F22 probe
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  probe:
+    if: >-
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      # ---- BEFORE: record both refs via the API ----
+      - name: Record ref SHAs before
+        id: before
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.issue.pull_request.url }}
+        run: |
+          set -uo pipefail
+          PR_NUM="${{ github.event.issue.number }}"
+          PR_HEAD="$(gh api "repos/$REPOSITORY/pulls/$PR_NUM" --jq '.head.ref')"
+          echo "pr_head=$PR_HEAD" >> "$GITHUB_OUTPUT"
+          echo "PR head branch: '$PR_HEAD'"
+
+          MAIN_SHA="$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha' 2>/dev/null || echo NONE)"
+          # URL-encode the head ref so OUR measurement is not affected by the same bug
+          ENC="$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$PR_HEAD")"
+          HEAD_SHA="$(gh api "repos/$REPOSITORY/git/ref/heads/$ENC" --jq '.object.sha' 2>/dev/null || echo NONE)"
+
+          echo "main_sha=$MAIN_SHA"   >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA"   >> "$GITHUB_OUTPUT"
+          echo "BEFORE  main=$MAIN_SHA  prhead=$HEAD_SHA"
+
+      - name: Run pinned claude-code-action
+        id: claude
+        continue-on-error: true
+        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          use_commit_signing: true
+
+      - name: Upload execution transcript
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: f22-execution-transcript
+          path: ${{ steps.claude.outputs.execution_file }}
+          if-no-files-found: warn
+
+      # ---- AFTER: compare and rule ----
+      - name: Classify result
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_HEAD: ${{ steps.before.outputs.pr_head }}
+          BEFORE_MAIN: ${{ steps.before.outputs.main_sha }}
+          BEFORE_HEAD: ${{ steps.before.outputs.head_sha }}
+          CONCLUSION: ${{ steps.claude.outputs.conclusion }}
+        run: |
+          set -uo pipefail
+          ENC="$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$PR_HEAD")"
+          AFTER_MAIN="$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha' 2>/dev/null || echo NONE)"
+          AFTER_HEAD="$(gh api "repos/$REPOSITORY/git/ref/heads/$ENC" --jq '.object.sha' 2>/dev/null || echo NONE)"
+
+          {
+            echo "## F22 probe result"
+            echo ""
+            echo "| ref | before | after |"
+            echo "|---|---|---|"
+            echo "| main | \`$BEFORE_MAIN\` | \`$AFTER_MAIN\` |"
+            echo "| $PR_HEAD | \`$BEFORE_HEAD\` | \`$AFTER_HEAD\` |"
+            echo ""
+            echo "Claude conclusion: \`${CONCLUSION:-<none>}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          MAIN_MOVED=false; HEAD_MOVED=false
+          [ "$AFTER_MAIN" != "$BEFORE_MAIN" ] && MAIN_MOVED=true
+          [ "$AFTER_HEAD" != "$BEFORE_HEAD" ] && HEAD_MOVED=true
+
+          echo "main moved: $MAIN_MOVED | pr head moved: $HEAD_MOVED"
+
+          if [ "$MAIN_MOVED" = true ] && [ "$HEAD_MOVED" = false ]; then
+            echo "RESULT=CONFIRMED - commit landed on main, PR head untouched" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::CONFIRMED: commit landed on 'main' instead of the PR head branch"
+            exit 0
+          fi
+          if [ "$MAIN_MOVED" = false ] && [ "$HEAD_MOVED" = true ]; then
+            echo "RESULT=NOT VULNERABLE - commit landed on the PR head branch" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$MAIN_MOVED" = false ] && [ "$HEAD_MOVED" = false ]; then
+            echo "RESULT=INVALID RUN - no commit anywhere. Claude may have made no change, or the run failed. Read the transcript; this is NOT a negative result." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "RESULT=AMBIGUOUS - both refs moved; read the transcript" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
