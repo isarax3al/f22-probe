@@ -3,7 +3,11 @@ on:
   push:
     branches: [main]
 jobs:
-  marker:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "CI executed on main from a PR-influenced commit — pusher=${{ github.actor }} sha=${{ github.sha }}"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: run build script with secret in env
+        run: bash build.sh
+        env:
+          FAKE_SECRET: ${{ secrets.FAKE_SECRET }}
