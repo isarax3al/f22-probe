@@ -1,0 +1,16 @@
+name: gate-check
+on:
+  push:
+    branches: [main]
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: enforce deploy gate
+        run: |
+          if [ -f deploy-gate.txt ]; then
+            echo "GATE PRESENT -- deploy allowed"
+          else
+            echo "GATE MISSING -- security/deploy gate has been removed from main"; exit 1
+          fi
