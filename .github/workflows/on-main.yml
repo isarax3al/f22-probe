@@ -1,0 +1,9 @@
+name: on-main
+on:
+  push:
+    branches: [main]
+jobs:
+  marker:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CI executed on main from a PR-influenced commit — pusher=${{ github.actor }} sha=${{ github.sha }}"
