@@ -1,1 +1,0 @@
-required CI gate - deploy is blocked unless this file is present
